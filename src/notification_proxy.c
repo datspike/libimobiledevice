@@ -270,7 +270,7 @@ static int np_get_notification(np_client_t client, char **notification)
 
 	np_lock(client);
 
-	property_list_service_error_t perr = property_list_service_receive_plist_with_timeout(client->parent, &dict, 500);
+	property_list_service_error_t perr = property_list_service_receive_plist_with_timeout(client->parent, &dict, 200);
 	if (perr == PROPERTY_LIST_SERVICE_E_RECEIVE_TIMEOUT) {
 		debug_info("NotificationProxy: no notification received!");
 		res = 0;
@@ -342,8 +342,7 @@ void* np_notifier( void* arg )
 			free(notification);
 			notification = NULL;
 		}
-		sleep(1);
-	}
+		}
 	if (npt) {
 		free(npt);
 	}

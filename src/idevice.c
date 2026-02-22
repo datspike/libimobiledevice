@@ -29,6 +29,9 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#ifndef WIN32
+#include <unistd.h>
+#endif
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -523,13 +526,49 @@ idevice_error_t idevice_connect(idevice_t device, uint16_t port, idevice_connect
 	}
 
 	if (device->conn_type == CONNECTION_USBMUXD) {
-		int sfd = usbmuxd_connect(device->mux_id, port);
+		int sfd = -1;
+		int connect_err = 0;
+		int attempt = 0;
+		const int max_attempts = 4;
+		const int retry_delay_us = 250000;
+
+		for (attempt = 0; attempt < max_attempts; attempt++) {
+			sfd = usbmuxd_connect(device->mux_id, port);
+			if (sfd >= 0) {
+				break;
+			}
+
+			connect_err = -sfd;
+			debug_info("ERROR: Connecting to usbmux device failed (attempt %d/%d): %d (%s)", attempt + 1, max_attempts, sfd, strerror(connect_err));
+
+			if (connect_err != EBADF && connect_err != ENODEV && connect_err != ECONNREFUSED) {
+				break;
+			}
+			if (attempt + 1 >= max_attempts) {
+				break;
+			}
+
+			if (device->udid && device->udid[0]) {
+				usbmuxd_device_info_t refreshed;
+				int res = usbmuxd_get_device(device->udid, &refreshed, DEVICE_LOOKUP_USBMUX);
+				if (res > 0 && refreshed.handle != 0) {
+					if (refreshed.handle != device->mux_id) {
+						debug_info("Refreshing usbmux device handle for %s: %u -> %u", device->udid, device->mux_id, refreshed.handle);
+					}
+					device->mux_id = refreshed.handle;
+				} else {
+					debug_info("Unable to refresh usbmux device handle for %s (res=%d)", device->udid, res);
+				}
+			}
+			usleep(retry_delay_us);
+		}
+
 		if (sfd < 0) {
-			debug_info("ERROR: Connecting to usbmux device failed: %d (%s)", sfd, strerror(-sfd));
-			switch (-sfd) {
+			switch (connect_err) {
 			case ECONNREFUSED:
 				return IDEVICE_E_CONNREFUSED;
 			case ENODEV:
+			case EBADF:
 				return IDEVICE_E_NO_DEVICE;
 			default:
 				break;
@@ -704,7 +743,15 @@ idevice_error_t idevice_connection_send(idevice_connection_t connection, const c
 	uint32_t sent = 0;
 	while (sent < len) {
 		uint32_t bytes = 0;
-		int s = internal_connection_send(connection, data+sent, len-sent, &bytes);
+		/*
+		 * Avoid very large single usbmuxd_send writes. Some hosts/devices
+		 * intermittently fail with EINVAL on multi-megabyte payloads.
+		 */
+		uint32_t chunk = len - sent;
+		if (chunk > 256 * 1024) {
+			chunk = 256 * 1024;
+		}
+		int s = internal_connection_send(connection, data+sent, chunk, &bytes);
 		if (s < 0) {
 			break;
 		}
